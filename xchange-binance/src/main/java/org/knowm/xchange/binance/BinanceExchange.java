@@ -59,6 +59,16 @@ public class BinanceExchange extends BaseExchange {
     RESILIENCE_REGISTRIES = null;
   }
 
+  /**
+   * Helps to provide custom resilence registers, overriding what would be created by default and
+   * returned by the {@link #getResilienceRegistries()}.
+   *
+   * <p>Retained till next call of {@link #resetResilienceRegistries()}.
+   */
+  public static void setResilienceRegistries(ResilienceRegistries resilienceRegistries) {
+    RESILIENCE_REGISTRIES = resilienceRegistries;
+  }
+
   @Override
   public ResilienceRegistries getResilienceRegistries() {
     if (RESILIENCE_REGISTRIES == null) {
