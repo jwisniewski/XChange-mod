@@ -8,7 +8,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.util.concurrent.RateLimiter;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import info.bitrich.xchangestream.binance.dto.*;
+import info.bitrich.xchangestream.binance.dto.BinanceRawTrade;
+import info.bitrich.xchangestream.binance.dto.BinanceWebsocketTransaction;
+import info.bitrich.xchangestream.binance.dto.BookTickerBinanceWebSocketTransaction;
+import info.bitrich.xchangestream.binance.dto.DepthBinanceWebSocketTransaction;
+import info.bitrich.xchangestream.binance.dto.TickerBinanceWebsocketTransaction;
+import info.bitrich.xchangestream.binance.dto.TradeBinanceWebsocketTransaction;
 import info.bitrich.xchangestream.binance.exceptions.UpFrontSubscriptionRequiredException;
 import info.bitrich.xchangestream.core.ProductSubscription;
 import info.bitrich.xchangestream.core.StreamingMarketDataService;
@@ -22,6 +27,7 @@ import io.reactivex.functions.Consumer;
 import java.io.IOException;
 import java.util.Date;
 import java.util.Map;
+import java.util.LinkedList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -48,7 +54,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedDeque;
+
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
@@ -76,6 +82,7 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
   private final BinanceStreamingService service;
   private final String orderBookUpdateFrequencyParameter;
   private final boolean realtimeOrderBookTicker;
+  private final int oderBookFetchLimitParameter;
 
   private final Map<CurrencyPair, Observable<BinanceTicker24h>> tickerSubscriptions;
   private final Map<CurrencyPair, Observable<BinanceBookTicker>> bookTickerSubscriptions;
@@ -97,10 +104,12 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
       BinanceMarketDataService marketDataService,
       Runnable onApiCall,
       final String orderBookUpdateFrequencyParameter,
-      boolean realtimeOrderBookTicker) {
+      boolean realtimeOrderBookTicker,
+      int oderBookFetchLimitParameter) {
     this.service = service;
     this.orderBookUpdateFrequencyParameter = orderBookUpdateFrequencyParameter;
     this.realtimeOrderBookTicker = realtimeOrderBookTicker;
+    this.oderBookFetchLimitParameter = oderBookFetchLimitParameter;
     this.marketDataService = marketDataService;
     this.onApiCall = onApiCall;
     this.tickerSubscriptions = new ConcurrentHashMap<>();
@@ -335,29 +344,19 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
     private final CurrencyPair currencyPair;
     private final Observable<DepthBinanceWebSocketTransaction> deltasObservable;
 
-    private final Queue<DepthBinanceWebSocketTransaction> deltasBuffer =
-        new ConcurrentLinkedDeque<>();
+    private final Queue<DepthBinanceWebSocketTransaction> deltasBuffer = new LinkedList<>();
     private final BehaviorSubject<OrderBook> booksSubject = BehaviorSubject.create();
 
     private final CompositeDisposable disposables = new CompositeDisposable();
 
     /**
-     * Used as a gate, preventing access to the book snapshot, until initialized on background
-     * thread.
+     * Helps to keep integrity of book snapshot which is initialized and patched on different
+     * threads.
      */
-    private volatile boolean bookInitialized;
+    private final Object bookIntegrityMonitor = new Object();
 
-    /**
-     * Volatile as, it is initialized on background thread, then accessed and updated on observable
-     * thread.
-     */
-    private volatile long bookLastUpdateId;
-
-    /**
-     * Volatile as, it is initialized on background thread, then accessed and updated on observable
-     * thread
-     */
-    private volatile OrderBook book;
+    private OrderBook book;
+    private long bookLastUpdateId;
 
     private OrderBookSubscription(
         Observable<DepthBinanceWebSocketTransaction> deltasObservable, CurrencyPair currencyPair) {
@@ -375,16 +374,18 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
       deltasObservable
           .doOnNext(
               delta -> {
-                if (bookInitialized) {
-                  if (!appendDelta(delta)) {
-                    disposables.add(asyncInitializeOrderBookSnapshot());
+                synchronized (bookIntegrityMonitor) {
+                  if (isBookInitialized()) {
+                    if (!appendDelta(delta)) {
+                      disposables.add(asyncInitializeOrderBookSnapshot());
+                    }
+                  } else {
+                    bufferDelta(delta);
                   }
-                } else {
-                  bufferDelta(delta);
                 }
               })
-          .filter(delta -> bookInitialized)
-          .map(delta -> book)
+          .filter(delta -> isBookInitialized())
+          .map(delta -> getBook())
           .doFinally(() -> dispose())
           .subscribe(booksSubject);
 
@@ -411,19 +412,36 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
       return booksSubject.hasComplete() || booksSubject.hasThrowable();
     }
 
+    private boolean isBookInitialized() {
+      synchronized (bookIntegrityMonitor) {
+        return book != null;
+      }
+    }
+
+    private OrderBook getBook() {
+      synchronized (bookIntegrityMonitor) {
+        return book;
+      }
+    }
+
     private void bufferDelta(DepthBinanceWebSocketTransaction delta) {
-      deltasBuffer.add(delta);
+      synchronized (bookIntegrityMonitor) {
+        deltasBuffer.add(delta);
+      }
     }
 
     private Disposable asyncInitializeOrderBookSnapshot() {
-      if (bookInitialized) {
+      if (isBookInitialized()) {
         LOG.info("Orderbook snapshot for {} was initialized before. Re-syncing.", currencyPair);
-      }
 
-      bookInitialized = false;
-      book = null;
-      deltasBuffer.clear();
-      bookLastUpdateId = 0;
+        synchronized (bookIntegrityMonitor) {
+          if (book != null) {
+            book = null;
+            deltasBuffer.clear();
+            bookLastUpdateId = 0;
+          }
+        }
+      }
 
       return deltasObservable
           .firstOrError()
@@ -431,22 +449,27 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
           .flatMap(delta -> fetchSingleBinanceOrderBookUpdatedAfter(delta))
           .subscribe(
               binanceBook -> {
-                book = BinanceMarketDataService.convertOrderBook(binanceBook, currencyPair);
-                bookLastUpdateId = binanceBook.lastUpdateId;
+                final OrderBook convertedBook =
+                    BinanceMarketDataService.convertOrderBook(binanceBook, currencyPair);
 
-                final List<DepthBinanceWebSocketTransaction> applicableBookPatches =
-                    deltasBuffer.stream()
-                        .filter(delta -> delta.getLastUpdateId() > binanceBook.lastUpdateId)
-                        .collect(Collectors.toList());
+                synchronized (bookIntegrityMonitor) {
+                  book = convertedBook;
+                  bookLastUpdateId = binanceBook.lastUpdateId;
 
-                deltasBuffer.clear();
+                  final List<DepthBinanceWebSocketTransaction> applicableBookPatches =
+                      deltasBuffer.stream()
+                          .filter(delta -> delta.getLastUpdateId() > binanceBook.lastUpdateId)
+                          .collect(Collectors.toList());
 
-                // Update the book with all buffered deltas (as probably nobody would like to be
-                // notified with an already outdated snapshot).
-                if (applicableBookPatches.stream().allMatch(delta -> appendDelta(delta))) {
-                  bookInitialized = true;
-                } else {
-                  disposables.add(asyncInitializeOrderBookSnapshot());
+                  deltasBuffer.clear();
+
+                  // Update the book with all buffered deltas (as probably nobody would like to be
+                  // notified with an already outdated snapshot).
+                  for (DepthBinanceWebSocketTransaction delta : applicableBookPatches) {
+                    if (!appendDelta(delta)) {
+                      disposables.add(asyncInitializeOrderBookSnapshot());
+                    }
+                  }
                 }
               },
               error -> disposeWithError(error));
@@ -454,23 +477,25 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
 
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     private boolean appendDelta(DepthBinanceWebSocketTransaction delta) {
-      if (delta.getFirstUpdateId() > bookLastUpdateId + 1) {
-        LOG.info(
-            "Orderbook snapshot for {} out of date (last={}, U={}, u={}).",
-            currencyPair,
-            bookLastUpdateId,
-            delta.getFirstUpdateId(),
-            delta.getLastUpdateId());
+      synchronized (bookIntegrityMonitor) {
+        if (delta.getFirstUpdateId() > bookLastUpdateId + 1) {
+          LOG.info(
+              "Orderbook snapshot for {} out of date (last={}, U={}, u={}).",
+              currencyPair,
+              bookLastUpdateId,
+              delta.getFirstUpdateId(),
+              delta.getLastUpdateId());
 
-        return false;
-      } else {
-        bookLastUpdateId = delta.getLastUpdateId();
+          return false;
+        } else {
+          bookLastUpdateId = delta.getLastUpdateId();
 
-        // FIXME The underlying impl would be more optimal if LimitOrders were created directly.
-        extractOrderBookUpdates(currencyPair, delta).forEach(update -> book.update(update));
+          // FIXME The underlying impl would be more optimal if LimitOrders were created directly.
+          extractOrderBookUpdates(currencyPair, delta).forEach(update -> book.update(update));
+        }
+
+        return true;
       }
-
-      return true;
     }
 
     private Single<BinanceOrderbook> fetchSingleBinanceOrderBookUpdatedAfter(
@@ -509,7 +534,7 @@ public class BinanceStreamingMarketDataService implements StreamingMarketDataSer
       try {
         onApiCall.run();
         fallbackOnApiCall.get().run();
-        return marketDataService.getBinanceOrderbook(currencyPair, 1000);
+        return marketDataService.getBinanceOrderbook(currencyPair, oderBookFetchLimitParameter);
       } catch (BinanceException e) {
         if (BinanceErrorAdapter.adapt(e) instanceof RateLimitExceededException) {
           if (fallenBack.compareAndSet(false, true)) {
