@@ -426,7 +426,7 @@ public abstract class NettyStreamingService<T> extends ConnectableService {
         Subscription subscription = entry.getValue();
         sendMessage(getSubscribeMessage(subscription.channelName, subscription.args));
       } catch (IOException e) {
-        LOG.error("Failed to reconnect channel: {}", entry.getKey());
+        LOG.error("Failed to reconnect channel: {} - {}", entry.getKey(), e.toString());
       }
     }
   }
@@ -436,7 +436,7 @@ public abstract class NettyStreamingService<T> extends ConnectableService {
     try {
       channel = getChannelNameFromMessage(message);
     } catch (IOException e) {
-      LOG.error("Cannot parse channel from message: {}", message);
+      LOG.error("Cannot parse channel from message: {} - {}", message, e.toString());
       return "";
     }
     return channel;
@@ -450,7 +450,7 @@ public abstract class NettyStreamingService<T> extends ConnectableService {
   protected void handleError(T message, Throwable t) {
     String channel = getChannel(message);
     if (!StringUtil.isNullOrEmpty(channel)) handleChannelError(channel, t);
-    else LOG.error("handleError cannot parse channel from message: {}", message);
+    else LOG.error("handleError cannot parse channel from message: {} - {}", message, t.toString());
   }
 
   protected void handleIdle(ChannelHandlerContext ctx) {
