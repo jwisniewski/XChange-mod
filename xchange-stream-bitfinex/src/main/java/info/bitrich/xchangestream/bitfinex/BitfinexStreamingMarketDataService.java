@@ -1,29 +1,20 @@
 package info.bitrich.xchangestream.bitfinex;
 
-import static org.knowm.xchange.bitfinex.service.BitfinexAdapters.adaptOrderBook;
-import static org.knowm.xchange.bitfinex.service.BitfinexAdapters.adaptTicker;
-import static org.knowm.xchange.bitfinex.service.BitfinexAdapters.adaptTrades;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexOrderbook;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebSocketOrderbookTransaction;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebSocketSnapshotOrderbook;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebSocketSnapshotTrades;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebSocketTickerTransaction;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebSocketTradesTransaction;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebSocketUpdateOrderbook;
-import info.bitrich.xchangestream.bitfinex.dto.BitfinexWebsocketUpdateTrade;
+import info.bitrich.xchangestream.bitfinex.dto.*;
 import info.bitrich.xchangestream.core.StreamingMarketDataService;
 import info.bitrich.xchangestream.service.netty.StreamingObjectMapperHelper;
 import io.reactivex.Observable;
-import java.util.HashMap;
-import java.util.Map;
-import org.knowm.xchange.currency.Currency;
 import org.knowm.xchange.currency.CurrencyPair;
 import org.knowm.xchange.dto.marketdata.OrderBook;
 import org.knowm.xchange.dto.marketdata.Ticker;
 import org.knowm.xchange.dto.marketdata.Trade;
 import org.knowm.xchange.dto.marketdata.Trades;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.knowm.xchange.bitfinex.service.BitfinexAdapters.*;
 
 /** Created by Lukas Zaoralek on 7.11.17. */
 public class BitfinexStreamingMarketDataService implements StreamingMarketDataService {
@@ -37,9 +28,18 @@ public class BitfinexStreamingMarketDataService implements StreamingMarketDataSe
   }
 
   private String pairToSymbol(CurrencyPair currencyPair) {
-    return (currencyPair.counter == Currency.USDT)
-        ? ("t" + currencyPair.base.getCurrencyCode() + "UST")
-        : ("t" + currencyPair.base.getCurrencyCode() + currencyPair.counter.getCurrencyCode());
+    String counter = currencyPair.counter.getCurrencyCode();
+    String base = currencyPair.base.getCurrencyCode();
+
+    if (base.length() > 3) {
+      base = base + ":";
+    }
+
+    if (counter.equals("USDT")) {
+      counter = "UST";
+    }
+
+    return "t" + base + counter;
   }
 
   @Override
