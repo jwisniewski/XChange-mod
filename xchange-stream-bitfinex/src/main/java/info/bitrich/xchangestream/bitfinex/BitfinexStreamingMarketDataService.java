@@ -31,6 +31,10 @@ public class BitfinexStreamingMarketDataService implements StreamingMarketDataSe
     String counter = currencyPair.counter.getCurrencyCode();
     String base = currencyPair.base.getCurrencyCode();
 
+    if (base.equals("USDC")) {
+        base = "UDC";
+    }
+
     if (base.length() > 3) {
       base = base + ":";
     }
